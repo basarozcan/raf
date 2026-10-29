@@ -1,35 +1,51 @@
-import Foundation
-import UniformTypeIdentifiers
+import AppKit
 
-/// Turns whatever was dropped (files, browser links, plain text) into URLs.
+/// Reads what is being dragged (files, browser links, plain-text links)
+/// straight from the drag pasteboard.
+///
+/// Files are always read as file URLs first, whatever their type, so a
+/// Markdown or other text file is treated as a file and not as its text.
 enum DroppedContent {
     struct Result {
         var files: [URL] = []
         var links: [URL] = []
+
+        var all: [URL] { files + links }
+        var isEmpty: Bool { files.isEmpty && links.isEmpty }
+        var directories: [URL] {
+            files.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+        }
     }
 
-    static let types: [UTType] = [.fileURL, .url, .plainText]
+    static let pasteboardTypes: [NSPasteboard.PasteboardType] = [.fileURL, .URL, .string]
 
-    static func load(from providers: [NSItemProvider]) async -> Result {
+    static func read(from pasteboard: NSPasteboard) -> Result {
         var result = Result()
 
-        for provider in providers {
-            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
-                || provider.canLoadObject(ofClass: URL.self) {
-                guard let url = await loadURL(from: provider) else { continue }
-                if url.isFileURL {
-                    result.files.append(url)
-                } else if let web = webURL(from: url.absoluteString) {
-                    result.links.append(web)
-                }
-            } else if provider.canLoadObject(ofClass: String.self) {
-                if let text = await loadString(from: provider), let web = webURL(from: text) {
-                    result.links.append(web)
-                }
-            }
+        let fileOptions: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        if let files = pasteboard.readObjects(forClasses: [NSURL.self], options: fileOptions) as? [URL] {
+            result.files = files
         }
+        guard result.files.isEmpty else { return result }
 
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            result.links = urls.compactMap { webURL(from: $0.absoluteString) }
+        }
+        if result.links.isEmpty, let text = pasteboard.string(forType: .string), let web = webURL(from: text) {
+            result.links = [web]
+        }
         return result
+    }
+
+    /// Picks an operation the drag source allows. Raf does the actual copy
+    /// or move itself, this only controls the cursor and what the source
+    /// does afterwards.
+    static func operation(for info: NSDraggingInfo) -> NSDragOperation {
+        let mask = info.draggingSourceOperationMask
+        for candidate: NSDragOperation in [.copy, .generic, .move, .link] where mask.contains(candidate) {
+            return candidate
+        }
+        return []
     }
 
     /// Returns a URL only for http(s) links, so stray text is ignored.
@@ -41,21 +57,5 @@ enum DroppedContent {
               url.host != nil
         else { return nil }
         return url
-    }
-
-    private static func loadURL(from provider: NSItemProvider) async -> URL? {
-        await withCheckedContinuation { continuation in
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                continuation.resume(returning: url)
-            }
-        }
-    }
-
-    private static func loadString(from provider: NSItemProvider) async -> String? {
-        await withCheckedContinuation { continuation in
-            _ = provider.loadObject(ofClass: String.self) { text, _ in
-                continuation.resume(returning: text)
-            }
-        }
     }
 }

@@ -24,7 +24,7 @@ private struct GeneralSettings: View {
 
     var body: some View {
         Form {
-            Toggle("Show the shelf when I start dragging a file or link", isOn: $settings.showOnDrag)
+            Toggle("Also open the shelf whenever I start dragging a file or link", isOn: $settings.showOnDrag)
 
             Toggle("Open Raf at login", isOn: $launchAtLogin)
                 .onChange(of: launchAtLogin) { enabled in
@@ -46,7 +46,7 @@ private struct GeneralSettings: View {
                     .foregroundStyle(.orange)
             }
 
-            Text("You can always open the shelf from the Raf menu bar icon.")
+            Text("Click the Raf menu bar icon to open the shelf, or drag files onto the icon. Right-click the icon for the menu.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -102,13 +102,7 @@ private struct FolderSettings: View {
     }
 
     private func chooseFolders() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = true
-        panel.prompt = "Add"
-        guard panel.runModal() == .OK else { return }
-        panel.urls.forEach(settings.addFolder(at:))
+        FolderPicker.chooseFolders().forEach(settings.addFolder(at:))
     }
 }
 

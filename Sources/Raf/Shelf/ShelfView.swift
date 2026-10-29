@@ -1,34 +1,57 @@
 import AppKit
 import SwiftUI
 
+/// The shelf: a Drop Bar that holds files, and a grid of action targets.
+/// Name of the coordinate space drop-target frames are measured in.
+enum ShelfLayout {
+    static let coordinateSpace = "raf.shelf"
+}
+
 @MainActor
 struct ShelfView: View {
     @EnvironmentObject private var store: ShelfStore
     @EnvironmentObject private var settings: AppSettings
 
+    private let columns = Array(repeating: GridItem(.fixed(84), spacing: 8), count: 3)
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            ShelfArea()
-            Divider()
-            actions
+            DropBar()
+            LazyVGrid(columns: columns, spacing: 8) {
+                ForEach(settings.folders) { folder in
+                    ActionTile(
+                        id: .folder(folder.id),
+                        title: folder.name,
+                        subtitle: folder.mode == .move ? "Move" : "Copy",
+                        systemImage: "folder.fill",
+                        tint: .blue
+                    )
+                }
+                ActionTile(id: .airDrop, title: "AirDrop", subtitle: nil, systemImage: "dot.radiowaves.left.and.right", tint: .cyan)
+                ActionTile(id: .shorten, title: "Shorten URL", subtitle: nil, systemImage: "link", tint: .purple)
+                ActionTile(id: .addFolder, title: "Add Folder", subtitle: nil, systemImage: "plus", tint: .gray)
+            }
             if let status = store.status {
                 StatusBanner(status: status)
-                    .transition(.opacity)
             }
         }
         .padding(12)
-        .frame(width: 280, height: 440, alignment: .top)
+        .frame(width: 300)
+        .fixedSize(horizontal: false, vertical: true)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.08))
         )
-        .animation(.easeInOut(duration: 0.15), value: store.status)
+        .coordinateSpace(name: ShelfLayout.coordinateSpace)
+        .onPreferenceChange(TargetFramesKey.self) { frames in
+            Task { @MainActor in ShelfStore.shared.targetFrames = frames }
+        }
     }
 
     private var header: some View {
-        HStack {
+        HStack(spacing: 8) {
             Text("Raf")
                 .font(.headline)
             if store.isBusy {
@@ -36,89 +59,61 @@ struct ShelfView: View {
                     .controlSize(.small)
             }
             Spacer()
+            if store.items.count > 1 {
+                DragAllHandle(urls: store.items.map(\.url))
+            }
             if !store.items.isEmpty {
                 Button("Clear") { store.clear() }
                     .buttonStyle(.borderless)
             }
-            Button {
-                ShelfController.shared.hide()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.secondary)
+            HeaderButton(
+                systemImage: store.isPinned ? "pin.fill" : "pin",
+                help: store.isPinned ? "Unpin: close when I click elsewhere" : "Pin: keep the shelf open"
+            ) {
+                store.isPinned.toggle()
             }
-            .buttonStyle(.borderless)
-            .help("Hide shelf")
-        }
-    }
-
-    private var actions: some View {
-        ScrollView {
-            VStack(spacing: 6) {
-                ForEach(settings.folders) { folder in
-                    DropTargetRow(
-                        title: folder.name,
-                        subtitle: folder.mode == .move ? "Move here" : "Copy here",
-                        systemImage: "folder.fill",
-                        onDrop: { store.handleDrop($0, action: .folder(folder)) },
-                        onTap: { store.performOnShelf(.folder(folder)) }
-                    )
-                }
-
-                if settings.folders.isEmpty {
-                    Text("Add folders in Settings to drop files into them.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 4)
-                }
-
-                DropTargetRow(
-                    title: "AirDrop",
-                    subtitle: "Send to a nearby device",
-                    systemImage: "dot.radiowaves.left.and.right",
-                    onDrop: { store.handleDrop($0, action: .airDrop) },
-                    onTap: { store.performOnShelf(.airDrop) }
-                )
-
-                DropTargetRow(
-                    title: "Shorten URL",
-                    subtitle: "Drop a link, or click to shorten the clipboard",
-                    systemImage: "link",
-                    onDrop: { store.handleDrop($0, action: .shorten) },
-                    onTap: { store.performOnShelf(.shorten) }
-                )
+            HeaderButton(systemImage: "gearshape", help: "Settings") {
+                ShelfController.shared.hide()
+                SettingsWindowController.shared.show()
             }
         }
     }
 }
 
-/// The holding area: files dropped here stay until dragged out or removed.
+// MARK: Drop Bar
+
+/// Holds files and links until they are dragged out, like Dropzone's Drop Bar.
 @MainActor
-private struct ShelfArea: View {
+private struct DropBar: View {
     @EnvironmentObject private var store: ShelfStore
-    @State private var isTargeted = false
 
     var body: some View {
+        let isTargeted = store.hoveredTarget == .shelf
+
         Group {
             if store.items.isEmpty {
-                VStack(spacing: 6) {
+                VStack(spacing: 4) {
                     Image(systemName: "tray.and.arrow.down")
                         .font(.title2)
-                    Text("Drop files here to hold them")
+                    Text("Drop Bar")
+                        .font(.callout.weight(.medium))
+                    Text("Drop files here to hold them, drag them out when you're ready")
                         .font(.caption)
+                        .multilineTextAlignment(.center)
                 }
                 .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, minHeight: 90)
+                .padding(10)
+                .frame(maxWidth: .infinity, minHeight: 84)
             } else {
                 ScrollView {
-                    VStack(spacing: 4) {
+                    VStack(spacing: 2) {
                         ForEach(store.items) { item in
-                            ShelfItemRow(item: item)
+                            DropBarRow(item: item)
                         }
                     }
                     .padding(4)
                 }
-                .frame(height: 130)
+                .frame(height: min(CGFloat(store.items.count) * 30 + 8, 158))
             }
         }
         .background(
@@ -130,44 +125,41 @@ private struct ShelfArea: View {
                 .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4]))
                 .foregroundStyle(isTargeted ? Color.accentColor : Color.secondary.opacity(0.4))
         )
-        .onDrop(of: DroppedContent.types, isTargeted: $isTargeted) { providers in
-            store.handleDrop(providers, action: .shelf)
-        }
+        .dropTarget(.shelf)
     }
 }
 
 @MainActor
-private struct ShelfItemRow: View {
+private struct DropBarRow: View {
     @EnvironmentObject private var store: ShelfStore
     let item: ShelfItem
 
     var body: some View {
-        HStack(spacing: 8) {
-            icon
-                .frame(width: 22, height: 22)
-            Text(title)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .font(.callout)
-            Spacer(minLength: 4)
+        HStack(spacing: 6) {
+            HStack(spacing: 8) {
+                icon
+                    .frame(width: 22, height: 22)
+                Text(title)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .font(.callout)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+            .overlay(DragSource(urls: [item.url]))
+            .help("Drag out to use it. Double-click to open. Right-click for more.")
+
             Button {
-                store.remove(item)
+                store.remove(urls: [item.url])
             } label: {
                 Image(systemName: "xmark")
                     .font(.caption2)
             }
             .buttonStyle(.borderless)
-            .help("Remove from shelf")
+            .help("Remove from Drop Bar")
         }
         .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .contentShape(Rectangle())
-        .onDrag {
-            if item.url.isFileURL, let provider = NSItemProvider(contentsOf: item.url) {
-                return provider
-            }
-            return NSItemProvider(object: item.url as NSURL)
-        }
+        .frame(height: 28)
     }
 
     private var title: String {
@@ -185,39 +177,78 @@ private struct ShelfItemRow: View {
     }
 }
 
-private struct DropTargetRow: View {
-    let title: String
-    let subtitle: String
-    let systemImage: String
-    let onDrop: ([NSItemProvider]) -> Bool
-    let onTap: () -> Void
-
-    @State private var isTargeted = false
+/// Drags every Drop Bar item out at once.
+private struct DragAllHandle: View {
+    let urls: [URL]
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: systemImage)
-                .font(.title3)
-                .frame(width: 26)
-                .foregroundStyle(Color.accentColor)
-            VStack(alignment: .leading, spacing: 1) {
+        Image(systemName: "square.stack.3d.up.fill")
+            .foregroundStyle(.secondary)
+            .frame(width: 20, height: 20)
+            .overlay(DragSource(urls: urls))
+            .help("Drag all \(urls.count) items")
+    }
+}
+
+// MARK: Action grid
+
+@MainActor
+private struct ActionTile: View {
+    @EnvironmentObject private var store: ShelfStore
+
+    let id: DropTargetID
+    let title: String
+    let subtitle: String?
+    let systemImage: String
+    let tint: Color
+
+    var body: some View {
+        let isTargeted = store.hoveredTarget == id
+
+        Button {
+            store.performOnShelf(id)
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 44, height: 44)
+                    .background(tint.gradient, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                 Text(title)
-                    .font(.callout.weight(.medium))
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.caption.weight(.medium))
                     .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(subtitle ?? " ")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
-            Spacer()
+            .padding(.horizontal, 4)
+            .frame(width: 84, height: 88)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isTargeted ? tint.opacity(0.28) : Color.clear)
+            )
+            .scaleEffect(isTargeted ? 1.06 : 1)
+            .contentShape(Rectangle())
         }
-        .padding(8)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(isTargeted ? Color.accentColor.opacity(0.25) : Color.primary.opacity(0.05))
-        )
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
-        .onDrop(of: DroppedContent.types, isTargeted: $isTargeted, perform: onDrop)
+        .buttonStyle(.plain)
+        .animation(.easeOut(duration: 0.12), value: isTargeted)
+        .dropTarget(id)
+    }
+}
+
+private struct HeaderButton: View {
+    let systemImage: String
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.borderless)
+        .help(help)
     }
 }
 
@@ -230,5 +261,29 @@ private struct StatusBanner: View {
             .foregroundStyle(status.isError ? Color.orange : Color.green)
             .lineLimit(2)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: Drop target frames
+
+/// Collects each drop target's frame so ShelfDropView can hit-test drags.
+struct TargetFramesKey: PreferenceKey {
+    static let defaultValue: [DropTargetID: CGRect] = [:]
+
+    static func reduce(value: inout [DropTargetID: CGRect], nextValue: () -> [DropTargetID: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+extension View {
+    func dropTarget(_ id: DropTargetID) -> some View {
+        background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: TargetFramesKey.self,
+                    value: [id: proxy.frame(in: .named(ShelfLayout.coordinateSpace))]
+                )
+            }
+        )
     }
 }

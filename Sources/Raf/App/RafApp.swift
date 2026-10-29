@@ -5,44 +5,10 @@ struct RafApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        MenuBarExtra("Raf", systemImage: "tray.and.arrow.down") {
-            MenuContent()
-        }
-
+        // The menu bar icon and shelf are plain AppKit (see StatusItemController),
+        // and Settings has its own window. SwiftUI still needs one scene.
         Settings {
-            SettingsView()
-                .environmentObject(AppSettings.shared)
+            EmptyView()
         }
-    }
-}
-
-private struct MenuContent: View {
-    var body: some View {
-        Button("Show Shelf") {
-            ShelfController.shared.toggle()
-        }
-        .keyboardShortcut("s")
-
-        Divider()
-
-        if #available(macOS 14, *) {
-            SettingsLink {
-                Text("Settings…")
-            }
-            .keyboardShortcut(",")
-        } else {
-            Button("Settings…") {
-                NSApp.activate(ignoringOtherApps: true)
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-            }
-            .keyboardShortcut(",")
-        }
-
-        Divider()
-
-        Button("Quit Raf") {
-            NSApp.terminate(nil)
-        }
-        .keyboardShortcut("q")
     }
 }

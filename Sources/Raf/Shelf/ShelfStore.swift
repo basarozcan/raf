@@ -11,14 +11,16 @@ struct StatusMessage: Equatable {
     let isError: Bool
 }
 
-enum DropAction {
+/// Every place on the shelf that accepts a drop.
+enum DropTargetID: Hashable {
     case shelf
-    case folder(FolderTarget)
+    case folder(UUID)
     case airDrop
     case shorten
+    case addFolder
 }
 
-/// Holds what is on the shelf and runs the actions behind each drop target.
+/// Holds what is on the Drop Bar and runs the action behind each target.
 @MainActor
 final class ShelfStore: ObservableObject {
     static let shared = ShelfStore()
@@ -26,12 +28,17 @@ final class ShelfStore: ObservableObject {
     @Published private(set) var items: [ShelfItem] = []
     @Published private(set) var status: StatusMessage?
     @Published private(set) var isBusy = false
+    @Published var isPinned = false
+    @Published var hoveredTarget: DropTargetID?
+
+    /// Where each drop target sits in the shelf, reported by SwiftUI.
+    var targetFrames: [DropTargetID: CGRect] = [:]
 
     private var statusClearTask: Task<Void, Never>?
 
     private init() {}
 
-    // MARK: Shelf contents
+    // MARK: Drop Bar contents
 
     func add(_ urls: [URL]) {
         for url in urls where !items.contains(where: { $0.url == url }) {
@@ -39,54 +46,81 @@ final class ShelfStore: ObservableObject {
         }
     }
 
-    func remove(_ item: ShelfItem) {
-        items.removeAll { $0.id == item.id }
+    func remove(urls: [URL]) {
+        items.removeAll { urls.contains($0.url) }
     }
 
     func clear() {
         items.removeAll()
     }
 
-    // MARK: Actions
-
-    /// Called by a drop target. Returns immediately; the work runs async.
-    func handleDrop(_ providers: [NSItemProvider], action: DropAction) -> Bool {
+    /// After items are dragged out, drop the ones that no longer exist where
+    /// they were (Finder moved them). Copied items stay on the Drop Bar.
+    func dragOutEnded(_ urls: [URL]) {
         Task {
-            let content = await DroppedContent.load(from: providers)
-            await perform(action, files: content.files, links: content.links)
+            // Finder can finish the move just after the drag session ends.
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            let gone = urls.filter { $0.isFileURL && !FileManager.default.fileExists(atPath: $0.path) }
+            remove(urls: gone)
         }
-        return true
     }
 
-    /// Called when a drop target is clicked: applies the action to whatever
-    /// is on the shelf. Clicking "Shorten URL" shortens the link on the clipboard.
-    func performOnShelf(_ action: DropAction) {
+    // MARK: Drops
+
+    func accepts(_ content: DroppedContent.Result, on target: DropTargetID, fromShelf: Bool) -> Bool {
+        switch target {
+        case .shelf: return !fromShelf && !content.isEmpty
+        case .folder: return !content.files.isEmpty
+        case .airDrop: return !content.isEmpty
+        case .shorten: return !content.links.isEmpty
+        case .addFolder: return !content.directories.isEmpty
+        }
+    }
+
+    func handleDrop(_ content: DroppedContent.Result, on target: DropTargetID) {
         Task {
-            if case .shorten = action {
+            await perform(target, files: content.files, links: content.links)
+            ShelfController.shared.actionDidFinish()
+        }
+    }
+
+    /// A target was clicked: apply it to everything on the Drop Bar.
+    /// Clicking "Shorten URL" shortens the link on the clipboard instead.
+    func performOnShelf(_ target: DropTargetID) {
+        Task {
+            switch target {
+            case .addFolder:
+                ShelfController.shared.hide()
+                FolderPicker.chooseFolders().forEach(AppSettings.shared.addFolder(at:))
+                return
+            case .shorten:
                 guard let link = Self.clipboardLink() else {
-                    post("Copy a link first, then click Shorten URL", isError: true)
+                    post("Copy a link first, or drop one here", isError: true)
                     return
                 }
                 await shorten(link)
                 return
+            default:
+                break
             }
 
             let urls = items.map(\.url)
             guard !urls.isEmpty else {
-                post("The shelf is empty", isError: true)
+                post("Drop files here, or put them on the Drop Bar first", isError: true)
                 return
             }
-            await perform(action, files: urls.filter(\.isFileURL), links: urls.filter { !$0.isFileURL })
+            await perform(target, files: urls.filter(\.isFileURL), links: urls.filter { !$0.isFileURL })
         }
     }
 
-    private func perform(_ action: DropAction, files: [URL], links: [URL]) async {
-        switch action {
+    private func perform(_ target: DropTargetID, files: [URL], links: [URL]) async {
+        switch target {
         case .shelf:
             add(files + links)
 
-        case .folder(let target):
-            await sendToFolder(files, target: target)
+        case .folder(let id):
+            guard let folder = AppSettings.shared.folders.first(where: { $0.id == id }) else { return }
+            await send(files, to: folder)
 
         case .airDrop:
             let all = files + links
@@ -101,10 +135,15 @@ final class ShelfStore: ObservableObject {
                 return
             }
             await shorten(link)
+
+        case .addFolder:
+            let folders = files.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            folders.forEach(AppSettings.shared.addFolder(at:))
+            post(folders.count == 1 ? "Added \(folders[0].lastPathComponent)" : "Added \(folders.count) folders")
         }
     }
 
-    private func sendToFolder(_ files: [URL], target: FolderTarget) async {
+    private func send(_ files: [URL], to folder: FolderTarget) async {
         guard !files.isEmpty else {
             post("Only files can go into a folder", isError: true)
             return
@@ -116,15 +155,15 @@ final class ShelfStore: ObservableObject {
         do {
             // Copying large files must not block the UI.
             let results = try await Task.detached {
-                try FolderAction.perform(files: files, target: target)
+                try FolderAction.perform(files: files, target: folder)
             }.value
 
-            if target.mode == .move {
-                items.removeAll { files.contains($0.url) }
+            if folder.mode == .move {
+                remove(urls: files)
             }
-            let verb = target.mode == .move ? "Moved" : "Copied"
+            let verb = folder.mode == .move ? "Moved" : "Copied"
             let noun = results.count == 1 ? "item" : "items"
-            post("\(verb) \(results.count) \(noun) to \(target.name)")
+            post("\(verb) \(results.count) \(noun) to \(folder.name)")
         } catch {
             post(error.localizedDescription, isError: true)
         }

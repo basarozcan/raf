@@ -53,7 +53,7 @@ final class AppSettings: ObservableObject {
         } else {
             folders = []
         }
-        showOnDrag = defaults.object(forKey: Key.showOnDrag) as? Bool ?? true
+        showOnDrag = defaults.object(forKey: Key.showOnDrag) as? Bool ?? false
         shortener = defaults.string(forKey: Key.shortener).flatMap(ShortenerProvider.init(rawValue:)) ?? .tinyURL
         shortenerBaseURL = defaults.string(forKey: Key.shortenerBaseURL) ?? ""
     }
